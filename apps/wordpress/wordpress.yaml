@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: Namespace
+metadata: { name: wordpress }
+---
+apiVersion: v1
+kind: Secret
+metadata: { name: db-creds, namespace: wordpress }
+stringData:
+  root-password: change-me-root
+  password: change-me-wp
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: mysql, namespace: wordpress }
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector: { matchLabels: { app: mysql } }
+  template:
+    metadata: { labels: { app: mysql } }
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          env:
+            - { name: MYSQL_DATABASE, value: wordpress }
+            - { name: MYSQL_USER, value: wordpress }
+            - name: MYSQL_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-creds, key: password } }
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-creds, key: root-password } }
+          ports: [{ containerPort: 3306 }]
+          resources: { requests: { cpu: 100m, memory: 512Mi }, limits: { memory: 1Gi } }
+          volumeMounts: [{ name: data, mountPath: /var/lib/mysql }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec: { accessModes: [ReadWriteOnce], storageClassName: manual, resources: { requests: { storage: 5Gi } } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: mysql, namespace: wordpress }
+spec: { clusterIP: None, selector: { app: mysql }, ports: [{ port: 3306 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: wordpress, namespace: wordpress }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: wordpress } }
+  template:
+    metadata: { labels: { app: wordpress } }
+    spec:
+      containers:
+        - name: wordpress
+          image: wordpress:6-apache
+          env:
+            - { name: WORDPRESS_DB_HOST, value: mysql }
+            - { name: WORDPRESS_DB_USER, value: wordpress }
+            - { name: WORDPRESS_DB_NAME, value: wordpress }
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-creds, key: password } }
+          ports: [{ containerPort: 80 }]
+          readinessProbe: { tcpSocket: { port: 80 }, initialDelaySeconds: 10 }
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 512Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: wordpress, namespace: wordpress }
+spec: { selector: { app: wordpress }, ports: [{ port: 80 }] }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: wordpress, namespace: wordpress }
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: wordpress.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: wordpress, port: { number: 80 } } }
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mysql-data-pv
+  labels:
+    type: mysql-data-pv
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 5Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: "/mnt/data"
+
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: manual
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
